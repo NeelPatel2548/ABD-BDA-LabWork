@@ -1,0 +1,283 @@
+ingestion_sales.py
+
+from pyspark import pipelines as dp
+
+# Create sales expectation
+sales_rule = {
+    "rule_1": "sales_id IS NOT NULL"
+}
+#create empty streaming table
+dp.create_streaming_table(
+    name = "sales_stg",
+    expect_all_or_drop = sales_rule
+)
+
+# create east sales flow
+@dp.append_flow(target = "sales_stg")
+def load_east_sales():
+    df = spark.readStream.table("pipeline_demo_oct26.source.sales_east")
+    return df
+
+# create west sales flow
+@dp.append_flow(target = "sales_stg")
+def load_west_sales():
+    df = spark.readStream.table("pipeline_demo_oct26.source.sales_west")
+    return df
+
+
+-----------------------------------------------------------
+
+#ingestion_products.py
+
+from pyspark import pipelines as dp
+
+# create products expectations
+products_rule = {
+    "rule_1": "product_id IS NOT NULL",
+    "rule_2": "price >= 0"
+}
+
+# ingest products
+@dp.table(
+    name = "products_stg"
+)
+@dp.expect_all_or_drop(products_rule)
+def products_stg():
+    df = spark.readStream.table("pipeline_demo_oct26.source.products")
+    return df
+
+-------------------------------------------------------------
+
+# ingestion_customers.py
+
+from pyspark import pipelines as dp
+
+# creating customers expectation
+customers_rule = {
+    "rule_1": "customer_id IS NOT NULL",
+    "rule_2": "customer_name IS NOT NULL"
+}
+# ingest customers
+@dp.table(
+    name = "customers_stg"
+)
+@dp.expect_all_or_drop(customers_rule)
+def customers_stg():
+    df = spark.readStream.table("pipeline_demo_oct26.source.customers")
+    return df
+
+-------------------------------------------------------------------
+
+# transform_sales.py
+
+from pyspark import pipelines as dp
+from pyspark.sql.functions import *
+from pyspark.sql.functions import col
+
+# Transforming Data
+@dp.view(
+    name = "sales_enr_view"
+)
+def sales_enr_view():
+    df = spark.readStream.table("sales_stg")
+    df = df.withColumn('total_amount', col("quantity") * col("amount"))
+    return df
+
+# creating destination silver table
+dp.create_streaming_table(
+    name = "sales_enr"
+)
+
+# create auto cdc flow
+dp.create_auto_cdc_flow(
+    target = "sales_enr",
+    source = "sales_enr_view",
+    keys = ["sales_id"],
+    sequence_by = "sale_timestamp",
+    ignore_null_updates = False,
+    apply_as_deletes = None,
+    apply_as_truncates = None,
+    column_list = None,
+    except_column_list = None,
+    stored_as_scd_type = 1,
+    track_history_column_list = None,
+    track_history_except_column_list = None
+)
+
+
+--------------------------------------------------------
+
+# transform_products.py
+
+from pyspark import pipelines as dp
+from pyspark.sql.functions import *
+from pyspark.sql.types import *
+
+# Transforming Data
+@dp.view(
+    name = "products_enr_view"
+)
+def products_enr_view():
+    df = spark.readStream.table("products_stg")
+    df = df.withColumn('price', col("price").cast(IntegerType()))
+    return df
+
+# creating destination silver table
+dp.create_streaming_table(
+    name = "products_enr"
+)
+
+# create auto cdc flow
+dp.create_auto_cdc_flow(
+    target = "products_enr",
+    source = "products_enr_view",
+    keys = ["product_id"],
+    sequence_by = "last_updated",
+    ignore_null_updates = False,
+    apply_as_deletes = None,
+    apply_as_truncates = None,
+    column_list = None,
+    except_column_list = None,
+    stored_as_scd_type = 1,
+    track_history_column_list = None,
+    track_history_except_column_list = None
+)
+
+------------------------------------------------------
+
+#transformation_customers.py
+
+from pyspark import pipelines as dp
+from pyspark.sql.functions import *
+from pyspark.sql.types import *
+
+# Transforming Data
+@dp.view(
+    name = "customers_enr_view"
+)
+def customers_enr_view():
+    df = spark.readStream.table("customers_stg")
+    df = df.withColumn("customer_name", upper(col("customer_name")))
+    return df
+
+# creating destination silver table
+dp.create_streaming_table(
+    name = "customers_enr"
+)
+
+# create auto cdc flow
+dp.create_auto_cdc_flow(
+    target = "customers_enr",
+    source = "customers_enr_view",
+    keys = ["customer_id"],
+    sequence_by = "last_updated",
+    ignore_null_updates = False,
+    apply_as_deletes = None,
+    apply_as_truncates = None,
+    column_list = None,
+    except_column_list = None,
+    stored_as_scd_type = 1,
+    track_history_column_list = None,
+    track_history_except_column_list = None
+)
+
+--------------------------------------------------
+
+# business_sales.py
+
+from pyspark import pipelines as dp
+from pyspark.sql.functions import *
+
+# create MAT Business Table
+@dp.table(
+    name = "business_sales"
+)
+def business_sales():
+    df_facts = spark.read.table("fact_sales")
+    df_dimCust = spark.read.table("dim_customers")
+    df_dimProd = spark.read.table("dim_products")
+
+    df_join = df_facts.join(df_dimCust, df_facts.customer_id == df_dimCust.customer_id, "inner").join(df_dimProd, df_facts.product_id == df_dimProd.product_id, "inner")
+
+    df_prun = df_join.select("region", "category", "total_amount")
+    df_agg = df_prun.groupBy("region","category").agg(sum("total_amount").alias("total_sales"))
+    return df_agg
+
+
+
+# dim_customers.py
+
+from pyspark import pipelines as dp
+
+# create empty streaming table
+dp.create_streaming_table(
+    name = "dim_customers"
+)
+
+# create auto cdc flow
+dp.create_auto_cdc_flow(
+    target = "dim_customers",
+    source = "customers_enr_view",
+    keys = ["customer_id"],
+    sequence_by = "last_updated",
+    ignore_null_updates = False,
+    apply_as_deletes = None,
+    apply_as_truncates = None,
+    column_list = None,
+    except_column_list = None,
+    stored_as_scd_type = 2,
+    track_history_column_list = None,
+    track_history_except_column_list = None
+)
+
+
+# dim_products.py
+
+from pyspark import pipelines as dp
+
+# create empty streaming table
+dp.create_streaming_table(
+    name = "dim_products"
+)
+
+# create auto cdc flow
+dp.create_auto_cdc_flow(
+    target = "dim_products",
+    source = "products_enr_view",
+    keys = ["product_id"],
+    sequence_by = "last_updated",
+    ignore_null_updates = False,
+    apply_as_deletes = None,
+    apply_as_truncates = None,
+    column_list = None,
+    except_column_list = None,
+    stored_as_scd_type = 2,
+    track_history_column_list = None,
+    track_history_except_column_list = None
+)
+
+
+# fact_sales.py
+
+from pyspark import pipelines as dp
+
+# create empty streaming table
+dp.create_streaming_table(
+    name = "fact_sales"
+)
+
+# create auto cdc flow
+dp.create_auto_cdc_flow(
+    target = "fact_sales",
+    source = "sales_enr_view",
+    keys = ["sales_id"],
+    sequence_by = "sale_timestamp",
+    ignore_null_updates = False,
+    apply_as_deletes = None,
+    apply_as_truncates = None,
+    column_list = None,
+    except_column_list = None,
+    stored_as_scd_type = 1,
+    track_history_column_list = None,
+    track_history_except_column_list = None
+)
